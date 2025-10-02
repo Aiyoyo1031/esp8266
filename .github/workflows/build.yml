@@ -44,11 +44,11 @@ jobs:
         arduino-cli config dump
 
     # ⭐ 关键：固定旧版 Core 2.7.4（兼容 dhcpSoftAP 老接口）
-    - name: Install ESP8266 core (2.7.4)
+    - name: Install ESP8266 core (pin to 3.0.0)
       run: |
         set -e
         arduino-cli core update-index
-        arduino-cli core install esp8266:esp8266@2.7.4
+        arduino-cli core install esp8266:esp8266@3.0.0
         arduino-cli core list
 
     - name: Install libraries (WiFiManager with fallback)
