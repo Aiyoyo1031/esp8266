@@ -8,32 +8,49 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Install Arduino CLI
-      uses: arduino/setup-arduino-cli@v1
+    # 缓存 Arduino 配置/库以加速后续构建（可选）
+    - name: Cache Arduino files
+      uses: actions/cache@v4
       with:
-        version: 1.1.1
+        path: |
+          ~/.arduino15
+          ~/Arduino/libraries
+        key: arduino-${{ runner.os }}-v1
 
-    - name: Install ESP8266 core
+    # 手动安装 Arduino CLI（绕过 setup-arduino-cli 的 latest 问题）
+    - name: Install Arduino CLI (manual, pinned)
+      run: |
+        curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh -s -- -b /usr/local/bin v1.1.1
+        arduino-cli version
+
+    - name: Prepare Arduino dirs
+      run: |
+        mkdir -p ~/Arduino/libraries
+        arduino-cli config init
+        arduino-cli config dump
+
+    - name: Install ESP8266 core (pinned)
       run: |
         arduino-cli core update-index
-        # 如需固定版本可加 @3.1.2
-        arduino-cli core install esp8266:esp8266
+        arduino-cli core install esp8266:esp8266@3.1.2
 
     - name: Install libraries
       run: |
-        arduino-cli lib install "WiFiManager"
+        # WiFiManager 推荐稳定版（可按需调整）
+        arduino-cli lib install "WiFiManager@2.0.17-rc.2"
 
     - name: Compile firmware
       run: |
-        # 选择 NodeMCU v2 / ESP-12E；如需换板型请改 FQBN
-        arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./esp8266_extender
+        # 使用与你源码目录一致的路径
+        arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./ESP8266_NAPT
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: firmware
-        path: ./esp8266_extender/build/esp8266.esp8266.nodemcuv2/*.bin
+        path: ./ESP8266_NAPT/build/esp8266.esp8266.nodemcuv2/*.bin
