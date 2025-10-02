@@ -13,7 +13,6 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    # 缓存 Arduino 配置/库以加速后续构建（可选）
     - name: Cache Arduino files
       uses: actions/cache@v4
       with:
@@ -22,10 +21,15 @@ jobs:
           ~/Arduino/libraries
         key: arduino-${{ runner.os }}-v1
 
-    # 手动安装 Arduino CLI（绕过 setup-arduino-cli 的 latest 问题）
-    - name: Install Arduino CLI (manual, pinned)
+    # 直接下载 arduino-cli，避免 install.sh 的参数/解析问题
+    - name: Install Arduino CLI (direct download, pinned)
       run: |
-        curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh -s -- -b /usr/local/bin v1.1.1
+        set -e
+        CLI_VERSION=1.1.1
+        curl -fsSL -o /tmp/arduino-cli.tar.gz \
+          https://github.com/arduino/arduino-cli/releases/download/${CLI_VERSION}/arduino-cli_${CLI_VERSION}_Linux_64bit.tar.gz
+        tar -C /tmp -xzf /tmp/arduino-cli.tar.gz
+        sudo mv /tmp/arduino-cli /usr/local/bin/arduino-cli
         arduino-cli version
 
     - name: Prepare Arduino dirs
@@ -41,12 +45,11 @@ jobs:
 
     - name: Install libraries
       run: |
-        # WiFiManager 推荐稳定版（可按需调整）
         arduino-cli lib install "WiFiManager@2.0.17-rc.2"
 
     - name: Compile firmware
       run: |
-        # 使用与你源码目录一致的路径
+        # 你的目录名/文件名已改为 ESP8266_NAPT/ESP8266_NAPT.ino
         arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./ESP8266_NAPT
 
     - name: Upload artifact
