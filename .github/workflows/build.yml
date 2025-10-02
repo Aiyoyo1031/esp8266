@@ -39,11 +39,10 @@ jobs:
         set -e
         mkdir -p ~/Arduino/libraries
         arduino-cli config init
-        # 加入 ESP8266 社区索引
+        # 添加 ESP8266 社区 Boards Manager 索引
         arduino-cli config set board_manager.additional_urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
         arduino-cli config dump
 
-    # ⭐ 关键：固定旧版 Core 2.7.4（兼容 dhcpSoftAP 老接口）
     - name: Install ESP8266 core (pin to 3.0.0)
       run: |
         set -e
@@ -61,14 +60,19 @@ jobs:
         fi
         arduino-cli lib list | grep -i WiFiManager || (echo "WiFiManager not installed"; exit 1)
 
-    - name: Compile firmware
+    - name: Compile firmware (export binaries)
       run: |
         set -e
-        # 你的目录/文件名：ESP8266_NAPT/ESP8266_NAPT.ino（只把 10→64 那一行改过）
-        arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./ESP8266_NAPT
+        arduino-cli compile \
+          --fqbn esp8266:esp8266:nodemcuv2 \
+          --export-binaries \
+          --output-dir "${{ github.workspace }}/out" \
+          ./ESP8266_NAPT
+        echo "== out/ 内容 =="
+        ls -al "${{ github.workspace }}/out"
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: firmware
-        path: ./ESP8266_NAPT/build/esp8266.esp8266.nodemcuv2/*.bin
+        path: out/*
