@@ -21,7 +21,6 @@ jobs:
           ~/Arduino/libraries
         key: arduino-${{ runner.os }}-v1
 
-    # 直接下载固定版本的 arduino-cli
     - name: Install Arduino CLI (direct download, pinned)
       run: |
         set -e
@@ -40,30 +39,31 @@ jobs:
         set -e
         mkdir -p ~/Arduino/libraries
         arduino-cli config init
-        # ⭐ 添加 ESP8266 社区索引
+        # 加入 ESP8266 社区索引
         arduino-cli config set board_manager.additional_urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
-        echo "=== arduino-cli config ==="
         arduino-cli config dump
 
     - name: Install ESP8266 core (pinned)
       run: |
         set -e
-        # 有了额外索引后再更新
         arduino-cli core update-index
-        # 安装 3.1.2（含 lwip/napt.h）
         arduino-cli core install esp8266:esp8266@3.1.2
         arduino-cli core list
 
-    - name: Install libraries
+    - name: Install libraries (WiFiManager with fallback)
       run: |
         set -e
-        arduino-cli lib install "WiFiManager@2.0.17-rc.2"
-        arduino-cli lib list
+        arduino-cli lib update-index
+        if ! arduino-cli lib install "WiFiManager"; then
+          echo "Index install failed, fallback to git URL..."
+          arduino-cli lib install --git-url https://github.com/tzapu/WiFiManager.git
+        fi
+        arduino-cli lib list | grep -i WiFiManager || (echo "WiFiManager not installed"; exit 1)
 
     - name: Compile firmware
       run: |
         set -e
-        # 你的目录/文件名：ESP8266_NAPT/ESP8266_NAPT.ino
+        # 你的目录/文件名：ESP8266_NAPT/ESP8266_NAPT.ino（只把 10→64 那一行改过）
         arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./ESP8266_NAPT
 
     - name: Upload artifact
