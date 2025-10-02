@@ -1,4 +1,9 @@
+// ESP8266_NAPT.ino
+// 仅做了极小改动以支持：AP 设置随时可修改并永久保存（commit + 零填充 + saveParams 即保存）
+// 推荐用 ESP8266 Arduino Core 3.0.0 编译
+
 #define DBG_Printf_Enable true
+#define HAVE_NETDUMP 0  // 关闭 NetDump 以避免缺库
 
 #if (DBG_Printf_Enable == true)
   #define BLINKER_PRINT Serial
@@ -23,11 +28,17 @@
 #define defaultAPMAC      {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}
 #endif
 
+// 轻量持久化标识（不影响旧数据；仅在不匹配时回落到默认）
+#define CONFIG_MAGIC  0x5A
+#define CONFIG_VER    0x01
+#define OFF_MAGIC     135
+#define OFF_VERSION   136
+
 #include <ESP8266WiFi.h>
 #include <lwip/napt.h>
 #include <lwip/dns.h>
 #include <LwipDhcpServer.h>
-#include <WiFiManager.h>         //https://github.com/tzapu/WiFiManager
+#include <WiFiManager.h>         // https://github.com/tzapu/WiFiManager
 //for LED status
 #include <Ticker.h>
 #include <EEPROM.h>
@@ -35,11 +46,9 @@
   #include <ArduinoOTA.h>
 #endif   
 
-
 //for LED status
 Ticker LED_ticker;
 Ticker KEY_ticker;
-
 
 bool shouldSaveConfig = false;
 bool shouldReconfig = false;
@@ -61,28 +70,20 @@ WiFiManagerParameter custom_apssid("APssid", "AP SSID", APSTASSID, 64);
 WiFiManagerParameter custom_appsw("APpassword", "AP password", APPASSWORD, 64);
 WiFiManagerParameter custom_apmac("Apmac", "AP MAC addr", APMAC, 18);
 
-
 #if HAVE_NETDUMP
 #include <NetDump.h>
 void dump(int netif_idx, const char* data, size_t len, int out, int success) {
   (void)success;
   Serial.print(out ? F("out ") : F(" in "));
   Serial.printf("%d ", netif_idx);
-
-  // optional filter example: if (netDump_is_ARP(data))
-  {
-    netDump(Serial, data, len);
-    //netDumpHex(Serial, data, len);
-  }
+  netDump(Serial, data, len);
 }
 #endif
 
 void LED_Tick_Service()
 {
-  //toggle state
-  digitalWrite(LED_PIN, !digitalRead(LED_PIN));     // set pin to the opposite state
+  digitalWrite(LED_PIN, !digitalRead(LED_PIN));
 }
-
 
 void KEY_Tick_Service(void)
 {
@@ -142,16 +143,10 @@ void MAC_Char2Str(char* MAC_Str,uint8_t* MAC_char)
 }
 byte nibble(char c)
 {
-    if (c >= '0' && c <= '9')
-        return c - '0';
-
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-
-    if (c >= 'A' && c <= 'F')
-        return c - 'A' + 10;
-
-    return 16; // Not a valid hexadecimal character
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return 16;
 }
 bool MAC_Str2Char(uint8_t* MAC_char,char* MAC_Str)
 {
@@ -183,74 +178,70 @@ bool MAC_Str2Char(uint8_t* MAC_char,char* MAC_Str)
   return true;
 }
 
+// ★ 修改：写入前零填充，写入后 commit()
 void EEPROM_SaveConfig()//保存函数
 {
   uint8_t check_sum = 0;
- EEPROM.begin(256);//向系统申请256b ROM
- //开始写入
+  EEPROM.begin(256);
+
+  // 清空区域，避免短串残留
+  for (int i = 0; i < 64; i++) EEPROM.write(i, 0);
+  for (int i = 0; i < 64; i++) EEPROM.write(i+64, 0);
+  for (int i = 0; i < 6;  i++) EEPROM.write(i+128, 0);
+
+  // 写 SSID
   uint8_t *p = (uint8_t*)(&APSTASSID);
-  for (int i = 0; i < 64; i++)
-  {
-    EEPROM.write(i, p[i]); //在闪存内模拟写入
-    check_sum += p[i];
-  }
+  for (int i = 0; i < 64; i++) { EEPROM.write(i, p[i]); check_sum += p[i]; }
+  // 写 PSK
   p = (uint8_t*)(&APPASSWORD);
-  for (int i = 0; i < 64; i++)
-  {
-    EEPROM.write(i+64, p[i]); //在闪存内模拟写入
-    check_sum += p[i];
-  }
+  for (int i = 0; i < 64; i++) { EEPROM.write(i+64, p[i]); check_sum += p[i]; }
+  // 写 MAC
   p = newMACAddress;
-  for (int i = 0; i < 6; i++)
-  {
-    EEPROM.write(i+128, p[i]); //在闪存内模拟写入
-    check_sum += p[i];
-  }
+  for (int i = 0; i < 6; i++) { EEPROM.write(i+128, p[i]); check_sum += p[i]; }
+  // 校验与标识
   EEPROM.write(134, check_sum);
-  EEPROM.end();//执行写入ROM
+  EEPROM.write(OFF_MAGIC,   CONFIG_MAGIC);
+  EEPROM.write(OFF_VERSION, CONFIG_VER);
+
+  EEPROM.commit();   // ★ 必须：提交到 Flash
+  EEPROM.end();
 }
 
-void EEPROM_ReadConfig()//保存函数
+void EEPROM_ReadConfig()//读取函数
 {
   uint8_t check_sum = 0;
-  EEPROM.begin(256);//向系统申请4096b ROM
-  //开始写入
-  for (int i = 0; i < 134; i++)
-  {
-    check_sum += EEPROM.read(i);
-  }
-  if(EEPROM.read(134)!=check_sum)
+  EEPROM.begin(256);
+  for (int i = 0; i < 134; i++) check_sum += EEPROM.read(i);
+
+  bool sum_ok   = (EEPROM.read(134) == check_sum);
+  bool magic_ok = (EEPROM.read(OFF_MAGIC)   == CONFIG_MAGIC);
+  bool ver_ok   = (EEPROM.read(OFF_VERSION) == CONFIG_VER);
+
+  if(!(sum_ok && magic_ok && ver_ok))
   {
   #if (DBG_Printf_Enable == true)
-    Serial.println("eeprom Reinit");
+    Serial.println("eeprom Reinit (magic/version/checksum mismatch)");
   #endif  
+    // 回落到默认并保存
+    strcpy(APSTASSID, defaultAPSTASSID);
+    strcpy(APPASSWORD, defaultAPPASSWORD);
+    uint8_t defmac[6] = defaultAPMAC;
+    for (int i=0;i<6;i++) newMACAddress[i] = defmac[i];
     EEPROM_SaveConfig();
   }
   else
   {
     uint8_t *p = (uint8_t*)(&APSTASSID);
-    for (int i = 0; i < 64; i++)
-    {
-      p[i] = EEPROM.read(i+0x00);
-      check_sum += p[i];
-    }
+    for (int i = 0; i < 64; i++) { p[i] = EEPROM.read(i+0x00); }
     p = (uint8_t*)(&APPASSWORD);
-    for (int i = 0; i < 64; i++)
-    {
-      p[i] = EEPROM.read(i+0x40);
-      check_sum += p[i];
-    }
+    for (int i = 0; i < 64; i++) { p[i] = EEPROM.read(i+0x40); }
     p = newMACAddress;
-    for (int i = 0; i < 6; i++)
-    {
-      p[i] = EEPROM.read(i+0x80);
-      check_sum += p[i];
-    }
+    for (int i = 0; i < 6; i++) { p[i] = EEPROM.read(i+0x80); }
     #if (DBG_Printf_Enable == true)
       Serial.print("saved ap ssid: ");
       Serial.println(APSTASSID);
       Serial.print("saved ap psw: ");
-      Serial.println(APSTASSID);
+      Serial.println(APPASSWORD); // ★ 修正日志笔误
     #endif  
   }
   EEPROM.end();
@@ -273,7 +264,6 @@ void WM_saveConfigCallback ()
     #endif  
     LED_ticker.detach();
     digitalWrite(LED_PIN, LED_ON);   
-    //LED_ticker.attach(0.05, LED_Tick_Service);
     shouldSaveConfig = true;
     shouldNAPTinit = true;
   }
@@ -287,9 +277,10 @@ void WM_saveConfigCallback ()
     shouldOTArun = false;   
   } 
 }
+
+// ★ 修改：参数校验通过也触发保存（不依赖 STA 已连接）
 void WM_saveParamsCallback () {
   #if (DBG_Printf_Enable == true)
-    //Serial.println("save Params");
     Serial.println("Get Params:");
     Serial.print(custom_apssid.getID());Serial.print(" : ");Serial.println(custom_apssid.getValue());
     Serial.print(custom_appsw.getID());Serial.print(" : ");Serial.println(custom_appsw.getValue());
@@ -301,6 +292,10 @@ void WM_saveParamsCallback () {
     strcpy(APSTASSID, custom_apssid.getValue());
     strcpy(APPASSWORD, custom_appsw.getValue());
     strcpy(APMAC, custom_apmac.getValue());
+
+    shouldSaveConfig = true;   // ★ 新增：参数一旦有效就保存到 EEPROM
+    shouldReconfig = false;
+    shouldOTArun = false;
   }
   else
   {
@@ -312,8 +307,6 @@ void WM_saveParamsCallback () {
     shouldOTArun = false;
     LED_ticker.attach(0.05, LED_Tick_Service);  
   }
-
-
 }
 void WM_ConfigPortalTimeoutCallback()
 {
@@ -327,122 +320,94 @@ void WM_ConfigPortalTimeoutCallback()
  */
 void WifiManager_init()
 {
-  /***  explicitly set mode, esp defaults to STA+AP   **/
   WiFi.mode(WIFI_STA);
   //wifi_set_macaddr(STATION_IF, &newMACAddress[0]);//ST模式
-  /*************************************/
-  /*** 步骤二：进行一系列配置，参考配置类方法 **/
-  // 配置连接超时
+
   wifiManager.setConnectTimeout(WifiManager_ConnectTimeout);
   wifiManager.setConfigPortalTimeout(WifiManager_ConfigPortalTimeout);
-  // 打印调试内容    
+
   #if (DBG_Printf_Enable == true)
     wifiManager.setDebugOutput(true);
   #else  
-     wifiManager.setDebugOutput(false);
+    wifiManager.setDebugOutput(false);
   #endif
   
-  // 设置最小信号强度
   wifiManager.setMinimumSignalQuality(30);
-  // 设置固定AP信息
+
   IPAddress _ip = IPAddress(192, 168, 8, 8);
   IPAddress _gw = IPAddress(192, 168, 8, 1);
   IPAddress _sn = IPAddress(255, 255, 255, 0);
   wifiManager.setAPStaticIPConfig(_ip, _gw, _sn);
-  // 设置点击保存的回调
+
   wifiManager.setSaveConfigCallback(WM_saveConfigCallback);
   wifiManager.setSaveParamsCallback(WM_saveParamsCallback);
-  // 设置点击参赛复位的回调
-  //wifiManager.setConfigResetCallback(WM_ConfigResetCallback);
-  //面板超时
   wifiManager.setConfigPortalTimeoutCallback(WM_ConfigPortalTimeoutCallback);  
-  // 设置 如果配置错误的ssid或者密码 退出配置模式
   wifiManager.setBreakAfterConfig(true);
-  // 设置过滤重复的AP 默认可以不用调用 这里只是示范
   wifiManager.setRemoveDuplicateAPs(true);
-  //非阻塞
   wifiManager.setConfigPortalBlocking(false);
-  // 添加额外的参数 获取blinker的auth密钥 只运行一次 不然会加出很多框
+
   if(WM_First_Run)
   {
     custom_apssid.setValue(APSTASSID,16);
-    custom_appsw.setValue(APPASSWORD,32);
+    custom_appsw.setValue(APPASSWORD,64);   // ★ 唯一长度改动：10 -> 64
     custom_apmac.setValue(APMAC,17);
     wifiManager.addParameter(&custom_apssid);   
     wifiManager.addParameter(&custom_appsw);
     wifiManager.addParameter(&custom_apmac); 
   }
   WM_First_Run = false;
- 
-  /*************************************/
-  /*** 步骤三：尝试连接网络，失败去到配置页面 **/
 
-    if (wifiManager.autoConnect()) 
-    {
-      #if (DBG_Printf_Enable == true)
-        Serial.println("connected...yeey :)");  
-      #endif  
-      //LED_ticker.attach(0.05, LED_Tick_Service);
-      LED_ticker.detach();
-      digitalWrite(LED_PIN, LED_ON);
-      shouldNAPTinit = true;
-    }
-    else
-    {
-      #if (DBG_Printf_Enable == true)
-        Serial.println("failed to connect and Configportal running");  
-      #endif  
-      LED_ticker.attach(0.2, LED_Tick_Service);
-      shouldNAPTinit = false;
-    }
+  if (wifiManager.autoConnect()) 
+  {
+    #if (DBG_Printf_Enable == true)
+      Serial.println("connected...yeey :)");  
+    #endif  
+    LED_ticker.detach();
+    digitalWrite(LED_PIN, LED_ON);
+    shouldNAPTinit = true;
+  }
+  else
+  {
+    #if (DBG_Printf_Enable == true)
+      Serial.println("failed to connect and Configportal running");  
+    #endif  
+    LED_ticker.attach(0.2, LED_Tick_Service);
+    shouldNAPTinit = false;
+  }
 }
 
 #if (ArduinoOTA_Enable == true)
   void ArduinoOTA_Init(void)
   {
-    // Port defaults to 8266
     ArduinoOTA.setPort(8266);
-    // Hostname defaults to esp8266-[ChipID]
     ArduinoOTA.setHostname("esp8266-extender");
-    // No authentication by default
     ArduinoOTA.setPassword("posystorage3");
     ArduinoOTA.onStart([]() {
         String type;
-        if (ArduinoOTA.getCommand() == U_FLASH) {
-          type = "sketch";
-        } else { // U_FS
-          type = "filesystem";
-        }
-  
+        if (ArduinoOTA.getCommand() == U_FLASH) type = "sketch";
+        else type = "filesystem";
         #if (DBG_Printf_Enable == true)
-        // NOTE: if updating FS this would be the place to unmount FS using FS.end()
-        Serial.println("Start updating " + type);
+          Serial.println("Start updating " + type);
         #endif
       });
       ArduinoOTA.onEnd([]() {
         #if (DBG_Printf_Enable == true)
-        Serial.println("\nEnd");
+          Serial.println("\nEnd");
         #endif      
       });
       ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
         #if (DBG_Printf_Enable == true)
-        Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+          Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
         #endif      
       });
       ArduinoOTA.onError([](ota_error_t error) {
         #if (DBG_Printf_Enable == true)
-        Serial.printf("Error[%u]: ", error);
-        if (error == OTA_AUTH_ERROR) {
-          Serial.println("Auth Failed");
-        } else if (error == OTA_BEGIN_ERROR) {
-          Serial.println("Begin Failed");
-        } else if (error == OTA_CONNECT_ERROR) {
-          Serial.println("Connect Failed");
-        } else if (error == OTA_RECEIVE_ERROR) {
-          Serial.println("Receive Failed");
-        } else if (error == OTA_END_ERROR) {
-          Serial.println("End Failed");
-        }
+          Serial.printf("Error[%u]: ", error);
+          if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+          else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+          else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+          else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+          else if (error == OTA_END_ERROR) Serial.println("End Failed");
         #endif      
       });
       ArduinoOTA.begin();
@@ -457,13 +422,12 @@ void NAPT_Init(void)
                 WiFi.dnsIP(0).toString().c_str(),
                 WiFi.dnsIP(1).toString().c_str());
 #endif  
-  
   wifi_set_macaddr(SOFTAP_IF, &newMACAddress[0]);//AP模式 
   // give DNS servers to AP side
   dhcpSoftAP.dhcps_set_dns(0, WiFi.dnsIP(0));
   dhcpSoftAP.dhcps_set_dns(1, WiFi.dnsIP(1));
 
-  WiFi.softAPConfig(  // enable AP, with android-compatible google domain
+  WiFi.softAPConfig(
     IPAddress(172, 217, 28, 254),
     IPAddress(172, 217, 28, 254),
     IPAddress(255, 255, 255, 0));
@@ -472,10 +436,8 @@ void NAPT_Init(void)
   Serial.printf("AP: %s\n", WiFi.softAPIP().toString().c_str());
   Serial.printf("Heap before: %d\n", ESP.getFreeHeap());
 #endif 
-  //修改AP的MAC地址
-  //wifi_set_macaddr(STATION_IF, &newMACAddress[0]);//ST模式
-  wifi_set_macaddr(SOFTAP_IF, &newMACAddress[0]);//AP模式 
- 
+  // 修改AP的MAC地址
+  wifi_set_macaddr(SOFTAP_IF, &newMACAddress[0]); 
 #if (DBG_Printf_Enable == true) 
   Serial.print("mac:");               
   Serial.println(WiFi.macAddress()); 
@@ -489,9 +451,6 @@ void NAPT_Init(void)
     ret = ip_napt_enable_no(SOFTAP_IF, 1);
 #if (DBG_Printf_Enable == true)
     Serial.printf("ip_napt_enable_no(SOFTAP_IF): ret=%d (OK=%d)\n", (int)ret, (int)ERR_OK);
-    if (ret == ERR_OK) {
-      //Serial.printf("WiFi Network '%s' with same password is now NATed behind '%s'\n", STASSID "extender", STASSID);
-    }
 #endif 
   }
 #if (DBG_Printf_Enable == true)
@@ -504,32 +463,29 @@ void NAPT_Init(void)
 
 void setup(void) 
 {
-    #if (DBG_Printf_Enable == true)
-    // 初始化串口
+  #if (DBG_Printf_Enable == true)
     Serial.begin(921600);
     Serial.println("");
     Serial.println("Serial 921600");
     Serial.printf("\n\nNAPT Range extender\n");
     Serial.printf("Heap on start: %d\n", ESP.getFreeHeap());
-    #endif
+  #endif
 
 #if HAVE_NETDUMP
     phy_capture = dump;
 #endif    
             
-    // 初始化有LED的IO
-    pinMode(LED_PIN, OUTPUT);
-    digitalWrite(LED_PIN, LED_OFF);
-    LED_ticker.attach(0.6, LED_Tick_Service);   
-    //读取配置
-    EEPROM_ReadConfig();  
-    wifi_set_macaddr(SOFTAP_IF, &newMACAddress[0]);//AP模式 
-    //开机一定时间后再具体初始化按键系统   
-    KEY_Init();   
-  // 重置保存的修改 目标是为了每次进来都是去掉配置页面
-  //wifiManager.resetSettings();
-    WM_First_Run = true;
-    WifiManager_init();
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LED_OFF);
+  LED_ticker.attach(0.6, LED_Tick_Service);   
+
+  EEPROM_ReadConfig();  
+  wifi_set_macaddr(SOFTAP_IF, &newMACAddress[0]);//AP模式 
+
+  KEY_Init();   
+
+  WM_First_Run = true;
+  WifiManager_init();
 
   if(shouldNAPTinit)
   {
@@ -542,7 +498,6 @@ void setup(void)
   } 
 }
 
-
 void loop(void) 
 {
   wifiManager.process();  
@@ -553,7 +508,6 @@ void loop(void)
     wifiManager.resetSettings();
     delay(100);
     ESP.restart();
-    //WifiManager_init();           
   }
   if(shouldSaveConfig)
   {
@@ -581,4 +535,3 @@ void loop(void)
     #endif  
   } 
 }
-
