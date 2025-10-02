@@ -21,14 +21,17 @@ jobs:
           ~/Arduino/libraries
         key: arduino-${{ runner.os }}-v1
 
-    # 直接下载 arduino-cli，避免 install.sh 的参数/解析问题
+    # ✅ 直接下载，tag 带 v，文件名不带 v
     - name: Install Arduino CLI (direct download, pinned)
       run: |
         set -e
         CLI_VERSION=1.1.1
-        curl -fsSL -o /tmp/arduino-cli.tar.gz \
-          https://github.com/arduino/arduino-cli/releases/download/${CLI_VERSION}/arduino-cli_${CLI_VERSION}_Linux_64bit.tar.gz
-        tar -C /tmp -xzf /tmp/arduino-cli.tar.gz
+        CLI_TAG=v${CLI_VERSION}
+        FILE=arduino-cli_${CLI_VERSION}_Linux_64bit.tar.gz
+        URL=https://github.com/arduino/arduino-cli/releases/download/${CLI_TAG}/${FILE}
+        echo "Downloading ${URL}"
+        curl -fSLo /tmp/${FILE} "${URL}"
+        tar -C /tmp -xzf /tmp/${FILE}
         sudo mv /tmp/arduino-cli /usr/local/bin/arduino-cli
         arduino-cli version
 
@@ -49,7 +52,7 @@ jobs:
 
     - name: Compile firmware
       run: |
-        # 你的目录名/文件名已改为 ESP8266_NAPT/ESP8266_NAPT.ino
+        # 你的目录/文件名：ESP8266_NAPT/ESP8266_NAPT.ino
         arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./ESP8266_NAPT
 
     - name: Upload artifact
