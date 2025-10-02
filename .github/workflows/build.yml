@@ -1,0 +1,39 @@
+name: Build ESP8266 firmware
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install Arduino CLI
+      uses: arduino/setup-arduino-cli@v1
+      with:
+        version: latest
+
+    - name: Install ESP8266 core
+      run: |
+        arduino-cli core update-index
+        # 如需固定版本可加 @3.1.2
+        arduino-cli core install esp8266:esp8266
+
+    - name: Install libraries
+      run: |
+        arduino-cli lib install "WiFiManager"
+
+    - name: Compile firmware
+      run: |
+        # 选择 NodeMCU v2 / ESP-12E；如需换板型请改 FQBN
+        arduino-cli compile --fqbn esp8266:esp8266:nodemcuv2 ./esp8266_extender
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware
+        path: ./esp8266_extender/build/esp8266.esp8266.nodemcuv2/*.bin
